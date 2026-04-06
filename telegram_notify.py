@@ -8,9 +8,9 @@ import urllib.parse
 import urllib.request
 
 CALL_STATUS_LABELS_UA: dict[str, str] = {
-    "waiting": "Очікування",
-    "in_progress": "В роботі",
-    "completed": "Завершено",
+    "waiting": "⏳ Очікування",
+    "in_progress": "🔧 У роботі",
+    "completed": "✅ Завершено",
 }
 
 
@@ -56,18 +56,18 @@ def send_order_update_notification(
     if len(task_short) > 220:
         task_short = task_short[:219] + "…"
     lines = [
-        "📞 Оновлення заявки на дзвінок",
+        "🔔 Оновлення вашої заявки",
         "",
-        f"Статус: {st}",
+        f"📍 Статус: {st}",
     ]
     notes = (admin_notes or "").strip()
     if notes:
-        lines.append(f"Нотатки: {notes}")
+        lines.append(f"📝 Нотатки: {notes}")
     lines.extend(
         [
             "",
-            f"Дата заявки: {created_at or '—'}",
-            f"Завдання: {task_short or '—'}",
+            f"📅 Дата заявки: {created_at or '—'}",
+            f"🎯 Завдання: {task_short or '—'}",
         ]
     )
     return send_telegram_text(telegram_user_id, "\n".join(lines))

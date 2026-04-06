@@ -82,15 +82,15 @@ def _format_admin_detail(rec: dict[str, str]) -> str:
     if len(task) > 3500:
         task = task[:3499] + "…"
     return (
-        f"📌 Заявка (рядок {sr})\n"
-        f"Дата: {rec.get('created_at_utc', '—')}\n"
-        f"Telegram: {rec.get('telegram_user_id', '—')} @{rec.get('telegram_username', '')}\n"
-        f"Телефон: {rec.get('phone', '—')}\n"
-        f"Контакт: {rec.get('contact_name', '—')}\n"
-        f"Тариф: {rec.get('package', '—')} · {rec.get('price_usd', '—')} USD\n"
-        f"Статус дзвінка: {format_call_status_ua(rec.get('call_status', ''))}\n"
-        f"Нотатки: {rec.get('admin_notes') or '—'}\n\n"
-        f"Завдання:\n{task}"
+        f"📋 Заявка · рядок таблиці {sr}\n\n"
+        f"📅 Дата: {rec.get('created_at_utc', '—')}\n"
+        f"👤 Telegram: {rec.get('telegram_user_id', '—')} @{rec.get('telegram_username', '')}\n"
+        f"📱 Телефон: {rec.get('phone', '—')}\n"
+        f"🏷 Контакт: {rec.get('contact_name', '—')}\n"
+        f"💰 Тариф: {rec.get('package', '—')} · {rec.get('price_usd', '—')} USD\n"
+        f"📍 Статус дзвінка: {format_call_status_ua(rec.get('call_status', ''))}\n"
+        f"📝 Нотатки: {rec.get('admin_notes') or '—'}\n\n"
+        f"🎯 Завдання:\n{task}"
     )
 
 
@@ -98,12 +98,12 @@ def _admin_detail_keyboard(sheet_row: int, list_page: int) -> InlineKeyboardMark
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Очікування", callback_data=f"adm:s:{sheet_row}:w"),
-                InlineKeyboardButton("В роботі", callback_data=f"adm:s:{sheet_row}:i"),
-                InlineKeyboardButton("Завершено", callback_data=f"adm:s:{sheet_row}:c"),
+                InlineKeyboardButton("⏳ Очікування", callback_data=f"adm:s:{sheet_row}:w"),
+                InlineKeyboardButton("🔧 У роботі", callback_data=f"adm:s:{sheet_row}:i"),
+                InlineKeyboardButton("✅ Готово", callback_data=f"adm:s:{sheet_row}:c"),
             ],
-            [InlineKeyboardButton("📝 Нотатки", callback_data=f"adm:n:{sheet_row}")],
-            [InlineKeyboardButton("« До списку", callback_data=f"adm:l:{list_page}")],
+            [InlineKeyboardButton("📝 Змінити нотатки", callback_data=f"adm:n:{sheet_row}")],
+            [InlineKeyboardButton("◀️ До списку заявок", callback_data=f"adm:l:{list_page}")],
         ]
     )
 
@@ -115,38 +115,43 @@ async def _admin_build_list_page(
     n = len(orders)
     if n == 0:
         return (
-            "📋 Заявок поки немає.",
-            InlineKeyboardMarkup([[InlineKeyboardButton("« Меню", callback_data="main_menu")]]),
+            "📭 Поки немає заявок у таблиці.\n\n"
+            "Як тільки клієнти оформлять запити — вони з’являться тут.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🏠 У головне меню", callback_data="main_menu")]]),
         )
     total_pages = max(1, (n + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
     context.user_data["admin_list_page"] = page
     start = page * ADMIN_PAGE_SIZE
     chunk = orders[start : start + ADMIN_PAGE_SIZE]
-    lines = [f"📋 Заявки (стор. {page + 1}/{total_pages}, усього {n})"]
+    lines = [
+        "📋 Усі заявки\n"
+        f"Сторінка {page + 1} з {total_pages} · заявок: {n}\n"
+        "Натисніть заявку, щоб змінити статус або нотатки."
+    ]
     buttons: list[list[InlineKeyboardButton]] = []
     for rec in chunk:
         sr = int(rec.get("_sheet_row") or 0)
         dt = (rec.get("created_at_utc") or "")[:16].replace("T", " ")
         uid = (rec.get("telegram_user_id") or "")[:14]
         st = format_call_status_ua(rec.get("call_status", ""))
-        lines.append(f"• рядок {sr} · {dt} · {uid} · {st}")
-        buttons.append([InlineKeyboardButton(f"📋 Рядок {sr}", callback_data=f"adm:v:{sr}")])
+        lines.append(f"• №{sr} · {dt} · id {uid} · {st}")
+        buttons.append([InlineKeyboardButton(f"📂 Відкрити №{sr}", callback_data=f"adm:v:{sr}")])
     nav: list[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton("« Попередня", callback_data=f"adm:l:{page - 1}"))
+        nav.append(InlineKeyboardButton("◀️ Назад", callback_data=f"adm:l:{page - 1}"))
     if page < total_pages - 1:
-        nav.append(InlineKeyboardButton("Далі »", callback_data=f"adm:l:{page + 1}"))
+        nav.append(InlineKeyboardButton("Вперед ▶️", callback_data=f"adm:l:{page + 1}"))
     if nav:
         buttons.append(nav)
-    buttons.append([InlineKeyboardButton("« Головне меню", callback_data="main_menu")])
+    buttons.append([InlineKeyboardButton("🏠 Головне меню", callback_data="main_menu")])
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 async def _admin_show_detail(q, context: ContextTypes.DEFAULT_TYPE, sheet_row: int) -> None:
     rec = await asyncio.to_thread(get_order_by_sheet_row_sync, sheet_row)
     if not rec:
-        await q.answer("Рядок не знайдено", show_alert=True)
+        await q.answer("❌ Заявку не знайдено в таблиці.", show_alert=True)
         return
     page = int(context.user_data.get("admin_list_page", 0))
     await q.answer()
@@ -176,7 +181,7 @@ async def _admin_edit_detail_after_change(
 async def cb_admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     q = update.callback_query
     if not is_admin(q.from_user.id):
-        await q.answer("Немає доступу", show_alert=True)
+        await q.answer("🔒 Доступ лише для адміністраторів.", show_alert=True)
         return
     data = q.data or ""
     parts = data.split(":")
@@ -200,16 +205,16 @@ async def cb_admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             code = parts[3] if len(parts) > 3 else ""
             new_status = _ADMIN_STATUS_CB.get(code)
             if not new_status:
-                await q.answer("Невідомий статус", show_alert=True)
+                await q.answer("⚠️ Невідомий статус.", show_alert=True)
                 return
             rec = await asyncio.to_thread(get_order_by_sheet_row_sync, row)
             if not rec:
-                await q.answer("Рядок не знайдено", show_alert=True)
+                await q.answer("❌ Заявку не знайдено в таблиці.", show_alert=True)
                 return
             notes = (rec.get("admin_notes") or "").strip()
             result = await asyncio.to_thread(update_order_workflow_sync, row, new_status, notes)
             if not result.get("changed"):
-                await q.answer("Без змін")
+                await q.answer("ℹ️ Змін не було — усе вже так.")
                 return
             uid = result.get("telegram_user_id")
             if uid is not None:
@@ -223,7 +228,7 @@ async def cb_admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
                 if not ok:
                     logger.warning("Telegram notify: %s", err)
-            await q.answer("Збережено")
+            await q.answer("✅ Збережено! Клієнту надіслано сповіщення.")
             await _admin_edit_detail_after_change(q, context, row)
             return
     except Exception as e:
@@ -233,7 +238,7 @@ async def cb_admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("Немає доступу.")
+        await update.message.reply_text("🔒 Цей розділ доступний лише адміністраторам.")
         return
     text, kb = await _admin_build_list_page(context, 0)
     await update.message.reply_text(text, reply_markup=kb)
@@ -242,7 +247,7 @@ async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def admin_notes_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     q = update.callback_query
     if not is_admin(q.from_user.id):
-        await q.answer("Немає доступу", show_alert=True)
+        await q.answer("🔒 Доступ лише для адміністраторів.", show_alert=True)
         return ConversationHandler.END
     m = re.match(r"^adm:n:(\d+)$", q.data or "")
     if not m:
@@ -251,8 +256,8 @@ async def admin_notes_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     sheet_row = int(m.group(1))
     context.user_data["admin_notes_row"] = sheet_row
     await q.message.reply_text(
-        f"Надішліть **нотатки** для заявки (рядок {sheet_row}).\n"
-        "Скасування: /cancel",
+        f"📝 Надішліть текст **нотаток** для заявки (рядок {sheet_row}).\n\n"
+        "Щоб скасувати — напишіть /cancel",
         parse_mode="Markdown",
     )
     return ADMIN_NOTES_WAITING
@@ -265,7 +270,7 @@ async def admin_notes_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     text = (update.message.text or "").strip()
     rec = await asyncio.to_thread(get_order_by_sheet_row_sync, row)
     if not rec:
-        await update.message.reply_text("Рядок не знайдено.")
+        await update.message.reply_text("❌ Заявку не знайдено. Спробуйте оновити список у адмінці.")
         context.user_data.pop("admin_notes_row", None)
         return ConversationHandler.END
     st = _norm_call_status(rec.get("call_status", ""))
@@ -280,45 +285,53 @@ async def admin_notes_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             st,
             text,
         )
-        msg = "Збережено. Користувачу надіслано повідомлення." if ok else f"Збережено, але Telegram: {err}"
+        msg = (
+            "✅ Готово! Клієнт отримав сповіщення в Telegram."
+            if ok
+            else f"⚠️ Нотатки збережено, але не вдалося надіслати повідомлення: {err}"
+        )
     else:
-        msg = "Змін не було."
+        msg = "ℹ️ Текст такий самий — змін не було."
     await update.message.reply_text(msg)
     return ConversationHandler.END
 
 
 async def admin_notes_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.pop("admin_notes_row", None)
-    await update.message.reply_text("Скасовано.")
+    await update.message.reply_text("👌 Добре, нотатки не змінюємо.")
     return ConversationHandler.END
 
 
 def _main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("Прозвон сервіс", callback_data="prozvon")]
+        [InlineKeyboardButton("📞 Прозвон сервіс", callback_data="prozvon")]
     ]
     if is_admin(user_id):
-        rows.append([InlineKeyboardButton("Адмінка · заявки", callback_data="adm:l:0")])
+        rows.append([InlineKeyboardButton("🛡️ Адмінка · заявки", callback_data="adm:l:0")])
     return InlineKeyboardMarkup(rows)
 
-MAIN_MENU_TEXT = "Оберіть розділ:"
+MAIN_MENU_TEXT = (
+    "👋 Вітаємо!\n\n"
+    "Оберіть розділ нижче — далі все підкажемо крок за кроком."
+)
 
-PROZVON_SUBMENU_TEXT = "📞 **Прозвон сервіс**\n\nОберіть дію:"
+PROZVON_SUBMENU_TEXT = "📞 **Прозвон сервіс**\n\nОберіть дію — ми поруч, якщо виникнуть питання."
 
 # Умови (юридичний текст без Markdown — менше помилок у Telegram)
 PROZVON_RULES = (
     "📌 Умови — Call Service (прозвон)\n\n"
-    "1. Опис послуги\n"
+    "👋 Перед оформленням перегляньте текст нижче — це правила співпраці.\n\n"
+    "1️⃣ Опис послуги\n"
     "Ми надаємо вихідні дзвінки від вашого імені іноземними мовами (англійська, німецька та ін.). "
     "Звінки можуть стосуватися підтвердження замовлень, комунікації з клієнтами, підтримки або "
     "взаємодії з третіми сторонами. За потреби доступний жіночий голос.\n"
     "Важливо: дзвінок має сильніший ефект, ніж переписка, але не гарантує 100% результат.\n\n"
-    "2. Оплата\n"
+    "2️⃣ Оплата\n"
     "При першій співпраці — передоплата $10. Подальші замовлення можуть оплачуватися після виконання "
     "(за домовленістю).\n"
     "Тарифи: 1 дзвінок — $10 · 3 дзвінки — $20 · кожен додатковий дзвінок — $5.\n"
     "Оплата не повертається після виконання дзвінка.\n\n"
-    "3. Дані перед дзвінком (повний пакет)\n"
+    "3️⃣ Дані перед дзвінком (повний пакет)\n"
     "Перед виконанням дзвінка клієнт зобов'язаний надати (у вільних полях форми нижче — стисло все необхідне):\n"
     "сайт; номер замовлення; сума замовлення; спосіб оплати;\n"
     "трек-номер, кур'єрська служба, дата доставки;\n"
@@ -326,13 +339,13 @@ PROZVON_RULES = (
     "номер телефону з замовлення; електронна пошта; назва товару;\n"
     "коротко суть дзвінка / задача; номер телефону магазину, куди телефонувати.\n"
     "Заявки без повного набору даних можуть бути відхилені або оброблені з затримкою.\n\n"
-    "4. Форма в боті (після «Почати оформлення»)\n"
+    "4️⃣ Форма в боті (після «Почати оформлення»)\n"
     "Крок 1 — ваш телефон для зв'язку.\n"
     "Крок 2 — ім'я / компанія.\n"
     "Крок 3 — задача (хто, мета, сценарій).\n"
     "Крок 4 — умови та всі додаткові дані з пункту 3.\n\n"
     "Тариф обирається після збереження заявки: 1 дзвінок — $10, 3 дзвінки — $20, кожен додатковий — $5.\n\n"
-    "Натискаючи «Почати оформлення», ви автоматично погоджуєтесь з цими умовами."
+    "✅ Натискаючи «Почати оформлення», ви автоматично погоджуєтесь з цими умовами."
 )
 
 
@@ -340,14 +353,16 @@ def _prozvon_submenu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📋 Мої заявки", callback_data="prozvon_my")],
-            [InlineKeyboardButton("➕ Новий запит на дзвінок", callback_data="prozvon_new")],
-            [InlineKeyboardButton("« Назад до меню", callback_data="main_menu")],
+            [InlineKeyboardButton("✨ Новий запит на дзвінок", callback_data="prozvon_new")],
+            [InlineKeyboardButton("🏠 У головне меню", callback_data="main_menu")],
         ]
     )
 
 
 def _prozvon_back_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("« Назад до прозвону", callback_data="prozvon_menu")]])
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("◀️ Назад до прозвону", callback_data="prozvon_menu")]]
+    )
 
 
 def _truncate_field(text: str, limit: int = 500) -> str:
@@ -360,9 +375,9 @@ def _truncate_field(text: str, limit: int = 500) -> str:
 def _payment_rule_ua(rec: dict[str, str]) -> str:
     raw = (rec.get("payment_rule") or "").strip()
     if raw == "prepay_first":
-        return "Перше співробітництво: передоплата $10 до виконання"
+        return "🔐 Перше співробітництво — передоплата $10 до виконання"
     if raw == "after_work":
-        return "Повторне замовлення: оплата після виконання (за домовленістю)"
+        return "🤝 Повторне замовлення — оплата після виконання (за домовленістю)"
     return raw or "—"
 
 
@@ -374,18 +389,18 @@ def _format_order_block(index: int, rec: dict[str, str]) -> str:
     first_ua = "так" if first in ("yes", "так", "true", "1") else ("ні" if first in ("no", "ні", "false", "0") else (first or "—"))
 
     return (
-        f"── Заявка №{index} ──\n"
-        f"Дата: {g('created_at_utc')}\n"
-        f"Телефон: {g('phone')}\n"
-        f"Контакт: {g('contact_name')}\n"
-        f"Завдання: {g('task_text')}\n"
-        f"Умови: {g('conditions_text')}\n"
-        f"Тариф: {g('package')} | {g('price_usd')} USD\n"
-        f"Перше замовлення: {first_ua}\n"
-        f"Умови оплати: {_payment_rule_ua(rec)}\n"
-        f"Статус оплати: {g('payment_status')}\n"
-        f"Статус дзвінка: {format_call_status_ua(rec.get('call_status', ''))}\n"
-        f"Нотатки адміністратора: {g('admin_notes')}"
+        f"┏━━ 📋 Заявка №{index} ━━\n"
+        f"📅 Дата: {g('created_at_utc')}\n"
+        f"📱 Телефон: {g('phone')}\n"
+        f"👤 Контакт: {g('contact_name')}\n"
+        f"🎯 Завдання: {g('task_text')}\n"
+        f"📎 Додатково / умови: {g('conditions_text')}\n"
+        f"💰 Тариф: {g('package')} · {g('price_usd')} USD\n"
+        f"🆕 Перше замовлення: {first_ua}\n"
+        f"💳 Умови оплати: {_payment_rule_ua(rec)}\n"
+        f"💵 Статус оплати: {g('payment_status')}\n"
+        f"📍 Статус дзвінка: {format_call_status_ua(rec.get('call_status', ''))}\n"
+        f"📝 Нотатки: {g('admin_notes')}"
     )
 
 
@@ -393,10 +408,10 @@ def _build_orders_messages(orders: list[dict[str, str]], max_len: int = 4000) ->
     """Розбиває список заявок на кілька повідомлень (ліміт Telegram ~4096)."""
     if not orders:
         return [
-            "📋 У вас поки немає збережених заявок.\n\n"
-            "Натисніть «Новий запит на дзвінок» у меню прозвону, щоб створити першу."
+            "📭 Поки немає заявок.\n\n"
+            "✨ Натисніть «Новий запит на дзвінок» у меню прозвону — і ми все збережемо тут."
         ]
-    header = f"📋 Ваші заявки ({len(orders)}):\n\n"
+    header = f"📋 Ваші заявки ({len(orders)} шт.)\n\n"
     parts = [_format_order_block(i, rec) for i, rec in enumerate(orders, 1)]
     chunks: list[str] = []
     buf = header
@@ -407,7 +422,7 @@ def _build_orders_messages(orders: list[dict[str, str]], max_len: int = 4000) ->
             buf = tentative
         else:
             chunks.append(buf)
-            buf = f"📋 (продовження)\n\n{part}"
+            buf = f"📎 Продовження списку\n\n{part}"
     if buf:
         chunks.append(buf)
     return chunks
@@ -473,8 +488,8 @@ async def cb_prozvon_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await q.answer()
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("Почати оформлення", callback_data="prozvon_start")],
-            [InlineKeyboardButton("« Назад", callback_data="prozvon_menu")],
+            [InlineKeyboardButton("✅ Почати оформлення", callback_data="prozvon_start")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="prozvon_menu")],
         ]
     )
     await q.edit_message_text(
@@ -488,14 +503,15 @@ async def cb_prozvon_my(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await q.answer()
     uid = q.from_user.id
     chat_id = q.message.chat_id
-    await q.edit_message_text("⏳ Завантажую ваші заявки…")
+    await q.edit_message_text("⏳ Завантажую список… Секунду.")
     try:
         orders = await list_orders_for_user(uid)
     except Exception as e:
         logger.exception("Читання заявок")
         await q.edit_message_text(
-            "Не вдалося завантажити заявки. Перевір доступ до таблиці та `.env`.\n"
-            f"Технічна причина: {e}",
+            "😕 Не вдалося завантажити заявки.\n\n"
+            "Перевірте підключення до Google Таблиці та змінні на сервері.\n"
+            f"Деталі: {e}",
             reply_markup=_prozvon_back_markup(),
         )
         return
@@ -524,22 +540,27 @@ async def conv_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     if q.message:
         await q.message.reply_text(
-            "Крок 1/4. Введіть номер телефону для звʼязку "
-            "(у міжнародному форматі, якщо можливо):",
+            "📱 **Крок 1 з 4**\n\n"
+            "Введіть номер телефону для звʼязку "
+            "(краще міжнародний формат, наприклад +380…):",
+            parse_mode="Markdown",
         )
     return PHONE
 
 
 async def conv_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["phone"] = (update.message.text or "").strip()
-    await update.message.reply_text("Крок 2/4. Введіть **імʼя або назву компанії** (контактна особа):", parse_mode="Markdown")
+    await update.message.reply_text(
+        "👤 **Крок 2 з 4**\n\nВведіть **імʼя або назву компанії** (контактна особа):",
+        parse_mode="Markdown",
+    )
     return NAME
 
 
 async def conv_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["contact_name"] = (update.message.text or "").strip()
     await update.message.reply_text(
-        "Крок 3/4. Опишіть **завдання**: кого прозвонити, мета, бажаний сценарій / очікування:",
+        "🎯 **Крок 3 з 4**\n\nОпишіть **завдання**: кого прозвонити, мета, бажаний сценарій / очікування:",
         parse_mode="Markdown",
     )
     return TASK
@@ -548,7 +569,7 @@ async def conv_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def conv_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["task_text"] = (update.message.text or "").strip()
     await update.message.reply_text(
-        "Крок 4/4. Опишіть **умови та додаткові дані**: часові вікна, обмеження, мова, зауваження:",
+        "📎 **Крок 4 з 4**\n\nОпишіть **умови та додаткові дані**: часові вікна, обмеження, мова, зауваження:",
         parse_mode="Markdown",
     )
     return CONDITIONS
@@ -564,24 +585,25 @@ async def conv_conditions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if is_first:
         pay_hint = (
-            "Це ваше **перше** замовлення: діє передоплата **$10** до виконання роботи.\n\n"
+            "🔐 Це ваше **перше** замовлення: передоплата **$10** до початку роботи.\n\n"
         )
     else:
         pay_hint = (
-            f"У системі вже є **{prior}** ваших заявок. Подальші замовлення можна оплачувати **після виконання** "
+            f"🤝 У вас уже **{prior}** заявок у системі. Подальші можна оплачувати **після виконання** "
             "(за домовленістю).\n\n"
         )
 
     keyboard = InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("1 дзвінок — $10", callback_data="tariff_1")],
-            [InlineKeyboardButton("3 дзвінки — $20", callback_data="tariff_3")],
-            [InlineKeyboardButton("Додатковий дзвінок — $5", callback_data="tariff_extra")],
+            [InlineKeyboardButton("💵 1 дзвінок — $10", callback_data="tariff_1")],
+            [InlineKeyboardButton("💵 3 дзвінки — $20", callback_data="tariff_3")],
+            [InlineKeyboardButton("➕ Додатковий дзвінок — $5", callback_data="tariff_extra")],
         ]
     )
     await update.message.reply_text(
         pay_hint
-        + "Дані прийнято. Оберіть **тариф** (заявку буде збережено після вибору):",
+        + "✅ Дані збережено в памʼяті бота.\n\n"
+        "Оберіть **тариф** — після цього заявку запишемо в таблицю:",
         reply_markup=keyboard,
         parse_mode="Markdown",
     )
@@ -604,14 +626,14 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     _need_str = ("phone", "contact_name", "task_text", "conditions_text")
     if any(not context.user_data.get(k) for k in _need_str) or "is_first_order" not in context.user_data:
         await q.answer(
-            "Дані форми не знайдено. Натисни /start і пройди кроки знову.",
+            "⚠️ Сесію не знайдено. Натисніть /start і пройдіть кроки знову.",
             show_alert=True,
         )
         return ConversationHandler.END
 
     # Повторний клік, поки йде insert_order (один процес)
     if context.user_data.get("_tariff_busy"):
-        await q.answer("Збереження вже виконується…", show_alert=False)
+        await q.answer("⏳ Заявка вже зберігається…", show_alert=False)
         return SELECT_TARIFF
 
     package_label, price = mapping[pkg_key]
@@ -632,7 +654,7 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         payment_rule=payment_rule,
     )
     # Після перевірок — одразу відповісти на callback (знімає «годинник» у клієнті)
-    await q.answer("Зберігаю заявку…", show_alert=False)
+    await q.answer("💾 Зберігаю заявку…", show_alert=False)
     context.user_data["_tariff_busy"] = True
     try:
         # Прибрати кнопки з повідомлення з тарифами (щоб не клацали повторно)
@@ -643,30 +665,32 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
         # Нове коротке повідомлення — легше й швидше за edit великого повідомлення
         status_msg = await q.message.reply_text(
-            "⏳ Запис у Google Таблицю…\n"
-            "(зазвичай кілька секунд — залежить від мережі та Google)"
+            "⏳ Записуємо у Google Таблицю…\n"
+            "Зазвичай це кілька секунд."
         )
         try:
             await insert_order(row)
         except Exception as e:
             logger.exception("Збереження заявки")
             await status_msg.edit_text(
-                "Не вдалося зберегти заявку в таблицю. Перевір `.env`, доступ до Google Таблиці та ключ сервісного акаунта.\n"
-                f"Технічна причина: {e}\n\n/start — спробувати знову."
+                "😕 Не вдалося зберегти заявку в таблицю.\n\n"
+                "Перевірте `.env`, доступ до таблиці та ключ сервісного акаунта.\n"
+                f"Деталі: {e}\n\n/start — почати спочатку."
             )
             context.user_data.clear()
             return ConversationHandler.END
 
         pay_note = (
-            "Нагадування: для першого замовлення потрібна передоплата $10 до виконання.\n\n"
+            "💡 Нагадування: для **першого** замовлення потрібна передоплата **$10** до виконання.\n\n"
             if is_first
-            else "Нагадування: для повторного замовлення оплату можна узгодити після виконання.\n\n"
+            else "💡 Для **повторного** замовлення оплату можна узгодити після виконання.\n\n"
         )
         await status_msg.edit_text(
-            "✅ Заявку збережено в таблиці.\n\n"
+            "✅ **Готово!** Заявку збережено.\n\n"
             + pay_note
-            + "Оплату підключимо окремо — тут буде перехід до платіжного сервісу.\n\n"
-            "/start — головне меню."
+            + "💳 Оплату підключимо окремо — з’явиться посилання на оплату.\n\n"
+            "Натисніть /start — повернутися в меню.",
+            parse_mode="Markdown",
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -676,13 +700,16 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 async def conv_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
-    await update.message.reply_text("Оформлення скасовано. Натисніть /start для меню.")
+    await update.message.reply_text(
+        "👌 Оформлення скасовано.\n\nНатисніть /start — відкрити меню знову."
+    )
     return ConversationHandler.END
 
 
 async def conv_fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Зараз потрібно обрати тариф кнопками під повідомленням або натисніть /cancel."
+        "👆 Оберіть тариф кнопками під повідомленням.\n"
+        "Або /cancel — скасувати оформлення."
     )
 
 
