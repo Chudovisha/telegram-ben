@@ -29,7 +29,24 @@ _HEADERS = [
     "package",
     "price_usd",
     "payment_status",
+    "is_first_cooperation",
+    "payment_rule",
 ]
+
+
+def _ensure_full_headers(ws: gspread.Worksheet) -> None:
+    """Якщо аркуш уже існував зі старими колонками — додає нові заголовки в кінець рядка 1."""
+    existing = ws.row_values(1)
+    if not existing:
+        ws.append_row(_HEADERS, value_input_option="USER_ENTERED")
+        return
+    existing_set = {h.strip() for h in existing if h}
+    missing = [h for h in _HEADERS if h not in existing_set]
+    if not missing:
+        return
+    start = len(existing) + 1
+    for i, name in enumerate(missing):
+        ws.update_cell(1, start + i, name)
 
 
 def _spreadsheet_id() -> str:
@@ -114,8 +131,7 @@ def _worksheet() -> gspread.Worksheet:
 
 
 def _ensure_headers(ws: gspread.Worksheet) -> None:
-    if not ws.acell("A1").value:
-        ws.append_row(_HEADERS, value_input_option="USER_ENTERED")
+    _ensure_full_headers(ws)
 
 
 @dataclass
@@ -129,6 +145,8 @@ class OrderRecord:
     conditions_text: str
     package: str
     price_usd: float
+    is_first_cooperation: bool
+    payment_rule: str  # prepay_first | after_work
 
 
 def insert_order_sync(row: OrderRecord) -> None:
@@ -149,6 +167,8 @@ def insert_order_sync(row: OrderRecord) -> None:
             row.package,
             row.price_usd,
             "pending",
+            "yes" if row.is_first_cooperation else "no",
+            row.payment_rule,
         ],
         value_input_option="USER_ENTERED",
     )
@@ -181,3 +201,11 @@ def list_orders_for_user_sync(telegram_user_id: int) -> list[dict[str, str]]:
 
 async def list_orders_for_user(telegram_user_id: int) -> list[dict[str, str]]:
     return await asyncio.to_thread(list_orders_for_user_sync, telegram_user_id)
+
+
+def count_orders_for_user_sync(telegram_user_id: int) -> int:
+    return len(list_orders_for_user_sync(telegram_user_id))
+
+
+async def count_orders_for_user(telegram_user_id: int) -> int:
+    return await asyncio.to_thread(count_orders_for_user_sync, telegram_user_id)

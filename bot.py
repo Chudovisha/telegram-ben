@@ -17,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 
-from storage import OrderRecord, insert_order, list_orders_for_user
+from storage import OrderRecord, count_orders_for_user, insert_order, list_orders_for_user
 
 load_dotenv()
 
@@ -59,7 +59,7 @@ PROZVON_RULES = (
     "Крок 2 — ім'я / компанія.\n"
     "Крок 3 — задача (хто, мета, сценарій).\n"
     "Крок 4 — умови та всі додаткові дані з пункту 3.\n\n"
-    "Тариф обирається після збереження заявки: 1 дзвінок — $10 або 3 дзвінки — $20.\n\n"
+    "Тариф обирається після збереження заявки: 1 дзвінок — $10, 3 дзвінки — $20, кожен додатковий — $5.\n\n"
     "Натискаючи «Почати оформлення», ви автоматично погоджуєтесь з цими умовами."
 )
 
@@ -85,9 +85,21 @@ def _truncate_field(text: str, limit: int = 500) -> str:
     return t[: limit - 1] + "…"
 
 
+def _payment_rule_ua(rec: dict[str, str]) -> str:
+    raw = (rec.get("payment_rule") or "").strip()
+    if raw == "prepay_first":
+        return "Перше співробітництво: передоплата $10 до виконання"
+    if raw == "after_work":
+        return "Повторне замовлення: оплата після виконання (за домовленістю)"
+    return raw or "—"
+
+
 def _format_order_block(index: int, rec: dict[str, str]) -> str:
     def g(key: str) -> str:
         return _truncate_field(rec.get(key, ""), 600)
+
+    first = (rec.get("is_first_cooperation") or "").strip().lower()
+    first_ua = "так" if first in ("yes", "так", "true", "1") else ("ні" if first in ("no", "ні", "false", "0") else (first or "—"))
 
     return (
         f"── Заявка №{index} ──\n"
@@ -97,7 +109,9 @@ def _format_order_block(index: int, rec: dict[str, str]) -> str:
         f"Завдання: {g('task_text')}\n"
         f"Умови: {g('conditions_text')}\n"
         f"Тариф: {g('package')} | {g('price_usd')} USD\n"
-        f"Оплата: {g('payment_status')}"
+        f"Перше замовлення: {first_ua}\n"
+        f"Умови оплати: {_payment_rule_ua(rec)}\n"
+        f"Статус оплати: {g('payment_status')}"
     )
 
 
@@ -270,14 +284,32 @@ async def conv_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def conv_conditions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["conditions_text"] = (update.message.text or "").strip()
+    uid = update.effective_user.id
+    prior = await count_orders_for_user(uid)
+    is_first = prior == 0
+    context.user_data["is_first_order"] = is_first
+    context.user_data["prior_orders_count"] = prior
+
+    if is_first:
+        pay_hint = (
+            "Це ваше **перше** замовлення: діє передоплата **$10** до виконання роботи.\n\n"
+        )
+    else:
+        pay_hint = (
+            f"У системі вже є **{prior}** ваших заявок. Подальші замовлення можна оплачувати **після виконання** "
+            "(за домовленістю).\n\n"
+        )
+
     keyboard = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("1 дзвінок — $10", callback_data="tariff_1")],
             [InlineKeyboardButton("3 дзвінки — $20", callback_data="tariff_3")],
+            [InlineKeyboardButton("Додатковий дзвінок — $5", callback_data="tariff_extra")],
         ]
     )
     await update.message.reply_text(
-        "Дані прийнято. Оберіть **тариф** (заявку буде збережено після вибору):",
+        pay_hint
+        + "Дані прийнято. Оберіть **тариф** (заявку буде збережено після вибору):",
         reply_markup=keyboard,
         parse_mode="Markdown",
     )
@@ -289,6 +321,7 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     mapping = {
         "tariff_1": ("1 дзвінок", 10.0),
         "tariff_3": ("3 дзвінки", 20.0),
+        "tariff_extra": ("Додатковий дзвінок", 5.0),
     }
     pkg_key = q.data or ""
     if pkg_key not in mapping:
@@ -296,8 +329,8 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         return SELECT_TARIFF
 
     # Неповні дані (часто через другий інстанс бота або зламану сесію) — до answer()
-    _need = ("phone", "contact_name", "task_text", "conditions_text")
-    if any(not context.user_data.get(k) for k in _need):
+    _need_str = ("phone", "contact_name", "task_text", "conditions_text")
+    if any(not context.user_data.get(k) for k in _need_str) or "is_first_order" not in context.user_data:
         await q.answer(
             "Дані форми не знайдено. Натисни /start і пройди кроки знову.",
             show_alert=True,
@@ -311,6 +344,8 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     package_label, price = mapping[pkg_key]
     user = q.from_user
+    is_first = bool(context.user_data["is_first_order"])
+    payment_rule = "prepay_first" if is_first else "after_work"
     row = OrderRecord(
         telegram_user_id=user.id,
         telegram_username=user.username,
@@ -321,6 +356,8 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         conditions_text=context.user_data["conditions_text"],
         package=package_label,
         price_usd=price,
+        is_first_cooperation=is_first,
+        payment_rule=payment_rule,
     )
     # Після перевірок — одразу відповісти на callback (знімає «годинник» у клієнті)
     await q.answer("Зберігаю заявку…", show_alert=False)
@@ -348,9 +385,15 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
             context.user_data.clear()
             return ConversationHandler.END
 
+        pay_note = (
+            "Нагадування: для першого замовлення потрібна передоплата $10 до виконання.\n\n"
+            if is_first
+            else "Нагадування: для повторного замовлення оплату можна узгодити після виконання.\n\n"
+        )
         await status_msg.edit_text(
             "✅ Заявку збережено в таблиці.\n\n"
-            "Оплату підключимо окремо — тут буде перехід до платіжного сервісу.\n\n"
+            + pay_note
+            + "Оплату підключимо окремо — тут буде перехід до платіжного сервісу.\n\n"
             "/start — головне меню."
         )
         context.user_data.clear()
@@ -419,7 +462,7 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, conv_conditions),
             ],
             SELECT_TARIFF: [
-                CallbackQueryHandler(conv_tariff, pattern=r"^tariff_[13]$"),
+                CallbackQueryHandler(conv_tariff, pattern=r"^tariff_(1|3|extra)$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, conv_fallback_text),
             ],
         },
