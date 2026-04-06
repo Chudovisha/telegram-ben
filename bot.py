@@ -6,6 +6,7 @@ import os
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import Conflict
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -325,6 +326,22 @@ async def conv_fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = context.error
+    if isinstance(err, Conflict):
+        logger.error(
+            "409 Conflict: один TELEGRAM_BOT_TOKEN не може використовуватися двома процесами. "
+            "Зупини локальний `python bot.py`, другий деплой на Railway, інший сервер або webhook. "
+            "Лиши лише один активний polling."
+        )
+        return
+    tb = getattr(err, "__traceback__", None)
+    if tb is not None:
+        logger.error("Необроблена помилка", exc_info=(type(err), err, tb))
+    else:
+        logger.error("Необроблена помилка: %s", err)
+
+
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -369,7 +386,10 @@ def main() -> None:
         ],
         name="prozvon_order",
         persistent=False,
+        # per_message=True тут заборонено: у станах є MessageHandler (PTB вимагає лише CallbackQuery).
     )
+
+    app.add_error_handler(on_error)
 
     # /start має бути перед ConversationHandler, інакше деякі оновлення можуть «губитися».
     app.add_handler(CommandHandler("start", cmd_start))
