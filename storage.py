@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -70,21 +71,29 @@ def _service_account_path() -> Path:
             return resolved
 
     raise RuntimeError(
-        "Файл JSON ключа сервісного акаунта не знайдено. Зроби так:\n"
-        "1) Google Cloud → APIs → увімкни Google Sheets API (і за потреби Drive API).\n"
-        "2) IAM → Service accounts → створи акаунт → Keys → Add key → JSON — збережи файл.\n"
-        "3) Поклади його в папку проєкту як google-service-account.json "
-        "або credentials.json, або вкажи шлях у .env: GOOGLE_SERVICE_ACCOUNT_FILE=D:\\\\шлях\\\\до\\\\файлу.json\n"
-        "4) У Google Таблиці: «Надати доступ» → email з поля client_email у JSON (роль: Редактор)."
+        "Файл JSON ключа сервісного акаунта не знайдено. Локально: поклади google-service-account.json у папку проєкту. "
+        "На Railway/Render: додай змінну GOOGLE_SERVICE_ACCOUNT_JSON з повним вмістом JSON (одним рядком). "
+        "Також: Google Sheets API, доступ сервісного email до таблиці."
     )
+
+
+def _get_credentials() -> Credentials:
+    """Ключ: або змінна GOOGLE_SERVICE_ACCOUNT_JSON (хмара), або файл на диску."""
+    raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    if raw_json:
+        try:
+            info = json.loads(raw_json)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                "GOOGLE_SERVICE_ACCOUNT_JSON не є валідним JSON. Перевір лапки та весь вміст у одній змінній."
+            ) from e
+        return Credentials.from_service_account_info(info, scopes=_SCOPES)
+    path = _service_account_path()
+    return Credentials.from_service_account_file(str(path), scopes=_SCOPES)
 
 
 def _client() -> gspread.Client:
-    creds = Credentials.from_service_account_file(
-        str(_service_account_path()),
-        scopes=_SCOPES,
-    )
-    return gspread.authorize(creds)
+    return gspread.authorize(_get_credentials())
 
 
 def _worksheet():
