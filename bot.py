@@ -272,14 +272,24 @@ async def conv_conditions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     q = update.callback_query
-    await q.answer()
     mapping = {
         "tariff_1": ("1 дзвінок", 10.0),
         "tariff_3": ("3 дзвінки", 20.0),
     }
     pkg_key = q.data or ""
     if pkg_key not in mapping:
+        await q.answer()
         return SELECT_TARIFF
+
+    # Повторний клік, поки йде insert_order (один процес)
+    if context.user_data.get("_tariff_busy"):
+        await q.answer("Збереження вже виконується…", show_alert=False)
+        return SELECT_TARIFF
+
+    # Callback одразу (до Google) — знімає «годинник» у Telegram
+    await q.answer("Зберігаю заявку…", show_alert=False)
+    context.user_data["_tariff_busy"] = True
+
     package_label, price = mapping[pkg_key]
     user = q.from_user
     row = OrderRecord(
@@ -293,25 +303,38 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         package=package_label,
         price_usd=price,
     )
-    await q.edit_message_text("⏳ Зберігаю заявку в таблицю…")
     try:
-        await insert_order(row)
-    except Exception as e:
-        logger.exception("Збереження заявки")
-        await q.edit_message_text(
-            "Не вдалося зберегти заявку в таблицю. Перевір `.env`, доступ до Google Таблиці та ключ сервісного акаунта.\n"
-            f"Технічна причина: {e}\n\n/start — спробувати знову."
+        # Прибрати кнопки з повідомлення з тарифами (щоб не клацали повторно)
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        # Нове коротке повідомлення — легше й швидше за edit великого повідомлення
+        status_msg = await q.message.reply_text(
+            "⏳ Запис у Google Таблицю…\n"
+            "(зазвичай кілька секунд — залежить від мережі та Google)"
+        )
+        try:
+            await insert_order(row)
+        except Exception as e:
+            logger.exception("Збереження заявки")
+            await status_msg.edit_text(
+                "Не вдалося зберегти заявку в таблицю. Перевір `.env`, доступ до Google Таблиці та ключ сервісного акаунта.\n"
+                f"Технічна причина: {e}\n\n/start — спробувати знову."
+            )
+            context.user_data.clear()
+            return ConversationHandler.END
+
+        await status_msg.edit_text(
+            "✅ Заявку збережено в таблиці.\n\n"
+            "Оплату підключимо окремо — тут буде перехід до платіжного сервісу.\n\n"
+            "/start — головне меню."
         )
         context.user_data.clear()
         return ConversationHandler.END
-
-    await q.edit_message_text(
-        "✅ Заявку збережено в таблиці.\n\n"
-        "Оплату підключимо окремо — тут буде перехід до платіжного сервісу.\n\n"
-        "/start — головне меню."
-    )
-    context.user_data.clear()
-    return ConversationHandler.END
+    finally:
+        context.user_data.pop("_tariff_busy", None)
 
 
 async def conv_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:

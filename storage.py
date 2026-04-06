@@ -92,14 +92,25 @@ def _get_credentials() -> Credentials:
     return Credentials.from_service_account_file(str(path), scopes=_SCOPES)
 
 
+_gs_client: gspread.Client | None = None
+_ws_cache: gspread.Worksheet | None = None
+
+
 def _client() -> gspread.Client:
-    return gspread.authorize(_get_credentials())
+    """Один клієнт на процес — менше рукостискань TLS/Google при кожному рядку."""
+    global _gs_client
+    if _gs_client is None:
+        _gs_client = gspread.authorize(_get_credentials())
+    return _gs_client
 
 
-def _worksheet():
-    gc = _client()
-    sh = gc.open_by_key(_spreadsheet_id())
-    return sh.sheet1
+def _worksheet() -> gspread.Worksheet:
+    global _ws_cache
+    if _ws_cache is None:
+        gc = _client()
+        sh = gc.open_by_key(_spreadsheet_id())
+        _ws_cache = sh.sheet1
+    return _ws_cache
 
 
 def _ensure_headers(ws: gspread.Worksheet) -> None:
