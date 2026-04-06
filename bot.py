@@ -281,14 +281,19 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await q.answer()
         return SELECT_TARIFF
 
+    # Неповні дані (часто через другий інстанс бота або зламану сесію) — до answer()
+    _need = ("phone", "contact_name", "task_text", "conditions_text")
+    if any(not context.user_data.get(k) for k in _need):
+        await q.answer(
+            "Дані форми не знайдено. Натисни /start і пройди кроки знову.",
+            show_alert=True,
+        )
+        return ConversationHandler.END
+
     # Повторний клік, поки йде insert_order (один процес)
     if context.user_data.get("_tariff_busy"):
         await q.answer("Збереження вже виконується…", show_alert=False)
         return SELECT_TARIFF
-
-    # Callback одразу (до Google) — знімає «годинник» у Telegram
-    await q.answer("Зберігаю заявку…", show_alert=False)
-    context.user_data["_tariff_busy"] = True
 
     package_label, price = mapping[pkg_key]
     user = q.from_user
@@ -303,6 +308,9 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         package=package_label,
         price_usd=price,
     )
+    # Після перевірок — одразу відповісти на callback (знімає «годинник» у клієнті)
+    await q.answer("Зберігаю заявку…", show_alert=False)
+    context.user_data["_tariff_busy"] = True
     try:
         # Прибрати кнопки з повідомлення з тарифами (щоб не клацали повторно)
         try:
@@ -424,6 +432,10 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(cb_main_menu_outer, pattern=r"^main_menu$"))
 
     print("Бот запущено. Ctrl+C — зупинка.")
+    logger.warning(
+        "Один TELEGRAM_BOT_TOKEN = один процес polling. Друга копія (ПК + Railway) дає 409 Conflict "
+        "і «крутиться» кнопка, поки один інстанс не відпустить оновлення."
+    )
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
