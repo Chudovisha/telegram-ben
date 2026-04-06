@@ -217,13 +217,15 @@ async def cb_main_menu_outer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def conv_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Нове повідомлення замість edit — швидше й без помилок Markdown на довгому попередньому тексті."""
     q = update.callback_query
     await q.answer()
     context.user_data.clear()
-    await q.edit_message_text(
-        "Крок 1/4. Введіть **номер телефону** для звʼязку (у міжнародному форматі, якщо можливо):",
-        parse_mode="Markdown",
-    )
+    if q.message:
+        await q.message.reply_text(
+            "Крок 1/4. Введіть номер телефону для звʼязку "
+            "(у міжнародному форматі, якщо можливо):",
+        )
     return PHONE
 
 
