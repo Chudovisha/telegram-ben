@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Адмінка — список дзвінків</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 960px; margin: 0 auto; padding: 1rem; }
+    h1 { font-size: 1.35rem; }
+    .top { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
+    .card { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; background: #fafafa; }
+    .meta { font-size: 0.9rem; color: #333; line-height: 1.5; }
+    .meta strong { color: #111; }
+    label { display: block; margin: 0.5rem 0 0.25rem; font-weight: 600; }
+    select, textarea { width: 100%; max-width: 100%; box-sizing: border-box; font-size: 1rem; padding: 0.4rem; }
+    textarea { min-height: 72px; resize: vertical; }
+    button { margin-top: 0.75rem; padding: 0.45rem 0.9rem; font-size: 1rem; cursor: pointer; }
+    .success { color: #0a6; }
+    .error { color: #b00020; }
+    .info { color: #555; }
+    .row-id { font-size: 0.85rem; color: #666; }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <h1>Список дзвінків (заявок)</h1>
+    <form method="post" action="{{ url_for('admin_logout') }}" style="margin-left:auto;">
+      <button type="submit">Вийти</button>
+    </form>
+  </div>
+
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      {% for category, message in messages %}
+        <p class="{{ category }}">{{ message }}</p>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  {% if not orders %}
+    <p>Заявок поки немає.</p>
+  {% endif %}
+
+  {% for o in orders %}
+  <div class="card">
+    <p class="row-id">Рядок таблиці: {{ o.get('_sheet_row', '—') }} · Telegram ID: {{ o.get('telegram_user_id', '—') }}
+      {% if o.get('telegram_username') %} · @{{ o.get('telegram_username') }}{% endif %}
+    </p>
+    <div class="meta">
+      <strong>Дата:</strong> {{ o.get('created_at_utc', '—') }}<br>
+      <strong>Телефон:</strong> {{ o.get('phone', '—') }} · <strong>Контакт:</strong> {{ o.get('contact_name', '—') }}<br>
+      <strong>Тариф:</strong> {{ o.get('package', '—') }} · {{ o.get('price_usd', '—') }} USD<br>
+      {% set task = o.get('task_text') or '' %}
+      <strong>Завдання:</strong> {{ task[:500] }}{% if task|length > 500 %}…{% endif %}
+    </div>
+    <form method="post" action="{{ url_for('admin_order_update', sheet_row=o.get('_sheet_row')|int) }}">
+      <label for="st-{{ o.get('_sheet_row') }}">Статус дзвінка</label>
+      <select id="st-{{ o.get('_sheet_row') }}" name="call_status">
+        {% for s in statuses %}
+        <option value="{{ s }}" {% if (o.get('call_status') or 'waiting') == s %}selected{% endif %}>
+          {{ status_labels.get(s, s) }}
+        </option>
+        {% endfor %}
+      </select>
+      <label for="notes-{{ o.get('_sheet_row') }}">Нотатки адміністратора</label>
+      <textarea id="notes-{{ o.get('_sheet_row') }}" name="admin_notes" placeholder="Внутрішні нотатки / коментар для клієнта у сповіщенні">{{ o.get('admin_notes', '') }}</textarea>
+      <button type="submit">Зберегти та надіслати сповіщення</button>
+    </form>
+  </div>
+  {% endfor %}
+</body>
+</html>

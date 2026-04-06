@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,7 +32,28 @@ _HEADERS = [
     "payment_status",
     "is_first_cooperation",
     "payment_rule",
+    "call_status",
+    "admin_notes",
 ]
+
+
+_sheet_lock = threading.Lock()
+
+CALL_STATUS_WAITING = "waiting"
+CALL_STATUS_IN_PROGRESS = "in_progress"
+CALL_STATUS_COMPLETED = "completed"
+CALL_STATUSES = (
+    CALL_STATUS_WAITING,
+    CALL_STATUS_IN_PROGRESS,
+    CALL_STATUS_COMPLETED,
+)
+
+
+def _parse_telegram_user_id(raw: str) -> int:
+    t = str(raw).strip()
+    if not t:
+        raise ValueError("порожній telegram_user_id")
+    return int(float(t))
 
 
 def _ensure_full_headers(ws: gspread.Worksheet) -> None:
@@ -152,26 +174,29 @@ class OrderRecord:
 def insert_order_sync(row: OrderRecord) -> None:
     """Синхронний запис рядка в таблицю (викликати з executor / to_thread)."""
     created = datetime.now(timezone.utc).isoformat()
-    ws = _worksheet()
-    _ensure_headers(ws)
-    ws.append_row(
-        [
-            created,
-            row.telegram_user_id,
-            row.telegram_username or "",
-            row.section,
-            row.phone,
-            row.contact_name,
-            row.task_text,
-            row.conditions_text,
-            row.package,
-            row.price_usd,
-            "pending",
-            "yes" if row.is_first_cooperation else "no",
-            row.payment_rule,
-        ],
-        value_input_option="USER_ENTERED",
-    )
+    with _sheet_lock:
+        ws = _worksheet()
+        _ensure_headers(ws)
+        ws.append_row(
+            [
+                created,
+                row.telegram_user_id,
+                row.telegram_username or "",
+                row.section,
+                row.phone,
+                row.contact_name,
+                row.task_text,
+                row.conditions_text,
+                row.package,
+                row.price_usd,
+                "pending",
+                "yes" if row.is_first_cooperation else "no",
+                row.payment_rule,
+                CALL_STATUS_WAITING,
+                "",
+            ],
+            value_input_option="USER_ENTERED",
+        )
 
 
 async def insert_order(row: OrderRecord) -> None:
@@ -179,11 +204,17 @@ async def insert_order(row: OrderRecord) -> None:
     await asyncio.to_thread(insert_order_sync, row)
 
 
+def _header_map(headers: list[str]) -> dict[str, int]:
+    """Ім'я колонки → індекс 0..len-1."""
+    return {h.strip(): i for i, h in enumerate(headers) if h.strip()}
+
+
 def list_orders_for_user_sync(telegram_user_id: int) -> list[dict[str, str]]:
     """Усі рядки з аркуша для цього telegram_user_id (нові зверху)."""
-    ws = _worksheet()
-    _ensure_headers(ws)
-    rows = ws.get_all_values()
+    with _sheet_lock:
+        ws = _worksheet()
+        _ensure_headers(ws)
+        rows = ws.get_all_values()
     if len(rows) < 2:
         return []
     headers = rows[0]
@@ -209,3 +240,90 @@ def count_orders_for_user_sync(telegram_user_id: int) -> int:
 
 async def count_orders_for_user(telegram_user_id: int) -> int:
     return await asyncio.to_thread(count_orders_for_user_sync, telegram_user_id)
+
+
+def list_all_orders_sync() -> list[dict[str, str]]:
+    """Усі заявки з аркуша для адмінки (нові зверху). Кожен запис містить `_sheet_row` — номер рядка в Google Таблиці."""
+    with _sheet_lock:
+        ws = _worksheet()
+        _ensure_headers(ws)
+        rows = ws.get_all_values()
+    if len(rows) < 2:
+        return []
+    headers = [h.strip() for h in rows[0]]
+    out: list[dict[str, str]] = []
+    for sheet_row, row in enumerate(rows[1:], start=2):
+        if len(row) < len(headers):
+            row = row + [""] * (len(headers) - len(row))
+        rec: dict[str, str] = {
+            headers[i]: (row[i] or "").strip() for i in range(len(headers))
+        }
+        rec["_sheet_row"] = str(sheet_row)
+        out.append(rec)
+    out.sort(key=lambda r: r.get("created_at_utc", ""), reverse=True)
+    return out
+
+
+def update_order_workflow_sync(
+    sheet_row: int,
+    call_status: str,
+    admin_notes: str,
+) -> dict[str, str | bool]:
+    """Оновлює статус дзвінка та нотатки. Повертає старі значення та чи були зміни."""
+    if call_status not in CALL_STATUSES:
+        raise ValueError(f"Недопустимий call_status: {call_status}")
+    notes = (admin_notes or "").strip()
+    with _sheet_lock:
+        ws = _worksheet()
+        _ensure_headers(ws)
+        rows = ws.get_all_values()
+        if sheet_row < 2 or sheet_row > len(rows):
+            raise ValueError("Некоректний номер рядка")
+        headers = [h.strip() for h in rows[0]]
+        hm = _header_map(headers)
+        if "call_status" not in hm or "admin_notes" not in hm:
+            raise RuntimeError("У таблиці немає колонок call_status / admin_notes")
+        data_row = rows[sheet_row - 1]
+        if len(data_row) < len(headers):
+            data_row = data_row + [""] * (len(headers) - len(data_row))
+        old_status = (data_row[hm["call_status"]] or "").strip()
+        old_notes = (data_row[hm["admin_notes"]] or "").strip()
+        changed = old_status != call_status or old_notes != notes
+        if not changed:
+            return {
+                "changed": False,
+                "old_status": old_status,
+                "old_notes": old_notes,
+            }
+        uid_raw = (data_row[hm["telegram_user_id"]] or "").strip()
+        created_at = (data_row[hm["created_at_utc"]] or "").strip()
+        task_text = (data_row[hm["task_text"]] or "").strip()
+        try:
+            tg_uid = _parse_telegram_user_id(uid_raw)
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Некоректний telegram_user_id у рядку {sheet_row}: {uid_raw!r}") from e
+        # 1-based колонки для update_cell
+        ws.update_cell(sheet_row, hm["call_status"] + 1, call_status)
+        ws.update_cell(sheet_row, hm["admin_notes"] + 1, notes)
+    return {
+        "changed": True,
+        "old_status": old_status,
+        "old_notes": old_notes,
+        "telegram_user_id": tg_uid,
+        "created_at": created_at,
+        "task_text": task_text,
+    }
+
+
+async def list_all_orders() -> list[dict[str, str]]:
+    return await asyncio.to_thread(list_all_orders_sync)
+
+
+async def update_order_workflow(
+    sheet_row: int,
+    call_status: str,
+    admin_notes: str,
+) -> dict[str, str | bool]:
+    return await asyncio.to_thread(
+        update_order_workflow_sync, sheet_row, call_status, admin_notes
+    )

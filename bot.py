@@ -18,6 +18,7 @@ from telegram.ext import (
 )
 
 from storage import OrderRecord, count_orders_for_user, insert_order, list_orders_for_user
+from telegram_notify import format_call_status_ua
 
 load_dotenv()
 
@@ -111,7 +112,9 @@ def _format_order_block(index: int, rec: dict[str, str]) -> str:
         f"Тариф: {g('package')} | {g('price_usd')} USD\n"
         f"Перше замовлення: {first_ua}\n"
         f"Умови оплати: {_payment_rule_ua(rec)}\n"
-        f"Статус оплати: {g('payment_status')}"
+        f"Статус оплати: {g('payment_status')}\n"
+        f"Статус дзвінка: {format_call_status_ua(rec.get('call_status', ''))}\n"
+        f"Нотатки адміністратора: {g('admin_notes')}"
     )
 
 
