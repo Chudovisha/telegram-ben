@@ -187,6 +187,7 @@ async def cb_prozvon_my(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await q.answer()
     uid = q.from_user.id
     chat_id = q.message.chat_id
+    await q.edit_message_text("⏳ Завантажую ваші заявки…")
     try:
         orders = await list_orders_for_user(uid)
     except Exception as e:
@@ -289,6 +290,7 @@ async def conv_tariff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         package=package_label,
         price_usd=price,
     )
+    await q.edit_message_text("⏳ Зберігаю заявку в таблицю…")
     try:
         await insert_order(row)
     except Exception as e:
@@ -328,7 +330,14 @@ def main() -> None:
             "Потрібен TELEGRAM_BOT_TOKEN у файлі .env (токен від @BotFather)."
         )
 
-    app = Application.builder().token(token).build()
+    app = (
+        Application.builder()
+        .token(token)
+        .connect_timeout(20.0)
+        .read_timeout(45.0)
+        .write_timeout(30.0)
+        .build()
+    )
 
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(conv_start, pattern=r"^prozvon_start$")],
@@ -370,7 +379,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(cb_main_menu_outer, pattern=r"^main_menu$"))
 
     print("Бот запущено. Ctrl+C — зупинка.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
