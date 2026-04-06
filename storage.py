@@ -319,6 +319,29 @@ async def list_all_orders() -> list[dict[str, str]]:
     return await asyncio.to_thread(list_all_orders_sync)
 
 
+def get_order_by_sheet_row_sync(sheet_row: int) -> dict[str, str] | None:
+    """Один рядок за номером рядка в аркуші (як у Google Таблиці)."""
+    with _sheet_lock:
+        ws = _worksheet()
+        _ensure_headers(ws)
+        rows = ws.get_all_values()
+    if sheet_row < 2 or sheet_row > len(rows):
+        return None
+    headers = [h.strip() for h in rows[0]]
+    data_row = rows[sheet_row - 1]
+    if len(data_row) < len(headers):
+        data_row = data_row + [""] * (len(headers) - len(data_row))
+    rec: dict[str, str] = {
+        headers[i]: (data_row[i] or "").strip() for i in range(len(headers))
+    }
+    rec["_sheet_row"] = str(sheet_row)
+    return rec
+
+
+async def get_order_by_sheet_row(sheet_row: int) -> dict[str, str] | None:
+    return await asyncio.to_thread(get_order_by_sheet_row_sync, sheet_row)
+
+
 async def update_order_workflow(
     sheet_row: int,
     call_status: str,

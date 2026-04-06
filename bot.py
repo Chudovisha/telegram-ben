@@ -1,8 +1,10 @@
 """Telegram-бот: розділи, «Прозвон сервіс», збір даних, запис у Google Таблицю, вибір тарифу."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import re
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -17,8 +19,18 @@ from telegram.ext import (
     filters,
 )
 
-from storage import OrderRecord, count_orders_for_user, insert_order, list_orders_for_user
-from telegram_notify import format_call_status_ua
+from storage import (
+    CALL_STATUSES,
+    CALL_STATUS_WAITING,
+    OrderRecord,
+    count_orders_for_user,
+    get_order_by_sheet_row_sync,
+    insert_order,
+    list_all_orders,
+    list_orders_for_user,
+    update_order_workflow_sync,
+)
+from telegram_notify import format_call_status_ua, send_order_update_notification
 
 load_dotenv()
 
@@ -29,6 +41,265 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 PHONE, NAME, TASK, CONDITIONS, SELECT_TARIFF = range(5)
+ADMIN_NOTES_WAITING = 0
+
+ADMIN_PAGE_SIZE = 5
+_ADMIN_STATUS_CB = {"w": "waiting", "i": "in_progress", "c": "completed"}
+
+
+def _parse_admin_ids() -> set[int]:
+    raw = os.environ.get("ADMIN_TELEGRAM_USER_IDS", "").strip()
+    if not raw:
+        return set()
+    out: set[int] = set()
+    for part in raw.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        try:
+            out.add(int(p))
+        except ValueError:
+            continue
+    return out
+
+
+def is_admin(user_id: int | None) -> bool:
+    if user_id is None:
+        return False
+    return user_id in _parse_admin_ids()
+
+
+def _norm_call_status(raw: str) -> str:
+    t = (raw or "").strip()
+    if t in CALL_STATUSES:
+        return t
+    return CALL_STATUS_WAITING
+
+
+def _format_admin_detail(rec: dict[str, str]) -> str:
+    sr = rec.get("_sheet_row", "")
+    task = rec.get("task_text") or "—"
+    if len(task) > 3500:
+        task = task[:3499] + "…"
+    return (
+        f"📌 Заявка (рядок {sr})\n"
+        f"Дата: {rec.get('created_at_utc', '—')}\n"
+        f"Telegram: {rec.get('telegram_user_id', '—')} @{rec.get('telegram_username', '')}\n"
+        f"Телефон: {rec.get('phone', '—')}\n"
+        f"Контакт: {rec.get('contact_name', '—')}\n"
+        f"Тариф: {rec.get('package', '—')} · {rec.get('price_usd', '—')} USD\n"
+        f"Статус дзвінка: {format_call_status_ua(rec.get('call_status', ''))}\n"
+        f"Нотатки: {rec.get('admin_notes') or '—'}\n\n"
+        f"Завдання:\n{task}"
+    )
+
+
+def _admin_detail_keyboard(sheet_row: int, list_page: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Очікування", callback_data=f"adm:s:{sheet_row}:w"),
+                InlineKeyboardButton("В роботі", callback_data=f"adm:s:{sheet_row}:i"),
+                InlineKeyboardButton("Завершено", callback_data=f"adm:s:{sheet_row}:c"),
+            ],
+            [InlineKeyboardButton("📝 Нотатки", callback_data=f"adm:n:{sheet_row}")],
+            [InlineKeyboardButton("« До списку", callback_data=f"adm:l:{list_page}")],
+        ]
+    )
+
+
+async def _admin_build_list_page(
+    context: ContextTypes.DEFAULT_TYPE, page: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    orders = await list_all_orders()
+    n = len(orders)
+    if n == 0:
+        return (
+            "📋 Заявок поки немає.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("« Меню", callback_data="main_menu")]]),
+        )
+    total_pages = max(1, (n + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    context.user_data["admin_list_page"] = page
+    start = page * ADMIN_PAGE_SIZE
+    chunk = orders[start : start + ADMIN_PAGE_SIZE]
+    lines = [f"📋 Заявки (стор. {page + 1}/{total_pages}, усього {n})"]
+    buttons: list[list[InlineKeyboardButton]] = []
+    for rec in chunk:
+        sr = int(rec.get("_sheet_row") or 0)
+        dt = (rec.get("created_at_utc") or "")[:16].replace("T", " ")
+        uid = (rec.get("telegram_user_id") or "")[:14]
+        st = format_call_status_ua(rec.get("call_status", ""))
+        lines.append(f"• рядок {sr} · {dt} · {uid} · {st}")
+        buttons.append([InlineKeyboardButton(f"📋 Рядок {sr}", callback_data=f"adm:v:{sr}")])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("« Попередня", callback_data=f"adm:l:{page - 1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("Далі »", callback_data=f"adm:l:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("« Головне меню", callback_data="main_menu")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+async def _admin_show_detail(q, context: ContextTypes.DEFAULT_TYPE, sheet_row: int) -> None:
+    rec = await asyncio.to_thread(get_order_by_sheet_row_sync, sheet_row)
+    if not rec:
+        await q.answer("Рядок не знайдено", show_alert=True)
+        return
+    page = int(context.user_data.get("admin_list_page", 0))
+    await q.answer()
+    text = _format_admin_detail(rec)
+    kb = _admin_detail_keyboard(sheet_row, page)
+    try:
+        await q.edit_message_text(text, reply_markup=kb)
+    except Exception:
+        await q.message.reply_text(text, reply_markup=kb)
+
+
+async def _admin_edit_detail_after_change(
+    q, context: ContextTypes.DEFAULT_TYPE, sheet_row: int
+) -> None:
+    rec = await asyncio.to_thread(get_order_by_sheet_row_sync, sheet_row)
+    if not rec:
+        return
+    page = int(context.user_data.get("admin_list_page", 0))
+    text = _format_admin_detail(rec)
+    kb = _admin_detail_keyboard(sheet_row, page)
+    try:
+        await q.edit_message_text(text, reply_markup=kb)
+    except Exception as e:
+        logger.warning("Не вдалося оновити картку заявки: %s", e)
+
+
+async def cb_admin_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not is_admin(q.from_user.id):
+        await q.answer("Немає доступу", show_alert=True)
+        return
+    data = q.data or ""
+    parts = data.split(":")
+    if len(parts) < 3:
+        await q.answer()
+        return
+    kind = parts[1]
+    try:
+        if kind == "l":
+            page = int(parts[2])
+            text, kb = await _admin_build_list_page(context, page)
+            await q.answer()
+            await q.edit_message_text(text, reply_markup=kb)
+            return
+        if kind == "v":
+            row = int(parts[2])
+            await _admin_show_detail(q, context, row)
+            return
+        if kind == "s":
+            row = int(parts[2])
+            code = parts[3] if len(parts) > 3 else ""
+            new_status = _ADMIN_STATUS_CB.get(code)
+            if not new_status:
+                await q.answer("Невідомий статус", show_alert=True)
+                return
+            rec = await asyncio.to_thread(get_order_by_sheet_row_sync, row)
+            if not rec:
+                await q.answer("Рядок не знайдено", show_alert=True)
+                return
+            notes = (rec.get("admin_notes") or "").strip()
+            result = await asyncio.to_thread(update_order_workflow_sync, row, new_status, notes)
+            if not result.get("changed"):
+                await q.answer("Без змін")
+                return
+            uid = result.get("telegram_user_id")
+            if uid is not None:
+                ok, err = await asyncio.to_thread(
+                    send_order_update_notification,
+                    int(uid),
+                    str(result.get("created_at") or ""),
+                    str(result.get("task_text") or ""),
+                    new_status,
+                    notes,
+                )
+                if not ok:
+                    logger.warning("Telegram notify: %s", err)
+            await q.answer("Збережено")
+            await _admin_edit_detail_after_change(q, context, row)
+            return
+    except Exception as e:
+        logger.exception("Адмін callback")
+        await q.answer(f"Помилка: {e}", show_alert=True)
+
+
+async def cmd_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("Немає доступу.")
+        return
+    text, kb = await _admin_build_list_page(context, 0)
+    await update.message.reply_text(text, reply_markup=kb)
+
+
+async def admin_notes_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    if not is_admin(q.from_user.id):
+        await q.answer("Немає доступу", show_alert=True)
+        return ConversationHandler.END
+    m = re.match(r"^adm:n:(\d+)$", q.data or "")
+    if not m:
+        return ConversationHandler.END
+    await q.answer()
+    sheet_row = int(m.group(1))
+    context.user_data["admin_notes_row"] = sheet_row
+    await q.message.reply_text(
+        f"Надішліть **нотатки** для заявки (рядок {sheet_row}).\n"
+        "Скасування: /cancel",
+        parse_mode="Markdown",
+    )
+    return ADMIN_NOTES_WAITING
+
+
+async def admin_notes_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    row = context.user_data.get("admin_notes_row")
+    if row is None:
+        return ConversationHandler.END
+    text = (update.message.text or "").strip()
+    rec = await asyncio.to_thread(get_order_by_sheet_row_sync, row)
+    if not rec:
+        await update.message.reply_text("Рядок не знайдено.")
+        context.user_data.pop("admin_notes_row", None)
+        return ConversationHandler.END
+    st = _norm_call_status(rec.get("call_status", ""))
+    result = await asyncio.to_thread(update_order_workflow_sync, row, st, text)
+    context.user_data.pop("admin_notes_row", None)
+    if result.get("changed") and result.get("telegram_user_id") is not None:
+        ok, err = await asyncio.to_thread(
+            send_order_update_notification,
+            int(result["telegram_user_id"]),
+            str(result.get("created_at") or ""),
+            str(result.get("task_text") or ""),
+            st,
+            text,
+        )
+        msg = "Збережено. Користувачу надіслано повідомлення." if ok else f"Збережено, але Telegram: {err}"
+    else:
+        msg = "Змін не було."
+    await update.message.reply_text(msg)
+    return ConversationHandler.END
+
+
+async def admin_notes_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop("admin_notes_row", None)
+    await update.message.reply_text("Скасовано.")
+    return ConversationHandler.END
+
+
+def _main_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("Прозвон сервіс", callback_data="prozvon")]
+    ]
+    if is_admin(user_id):
+        rows.append([InlineKeyboardButton("Адмінка · заявки", callback_data="adm:l:0")])
+    return InlineKeyboardMarkup(rows)
 
 MAIN_MENU_TEXT = "Оберіть розділ:"
 
@@ -143,9 +414,8 @@ def _build_orders_messages(orders: list[dict[str, str]], max_len: int = 4000) ->
 
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Прозвон сервіс", callback_data="prozvon")]]
-    )
+    uid = update.effective_user.id if update.effective_user else 0
+    keyboard = _main_menu_keyboard(uid)
     if update.callback_query:
         q = update.callback_query
         await q.answer()
@@ -167,9 +437,8 @@ async def cmd_start_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def show_main_menu_from_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Прозвон сервіс", callback_data="prozvon")]]
-    )
+    uid = update.effective_user.id if update.effective_user else 0
+    keyboard = _main_menu_keyboard(uid)
     await update.message.reply_text(MAIN_MENU_TEXT, reply_markup=keyboard)
 
 
@@ -449,6 +718,21 @@ def main() -> None:
         .build()
     )
 
+    admin_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(admin_notes_entry, pattern=r"^adm:n:\d+$")],
+        states={
+            ADMIN_NOTES_WAITING: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_notes_save),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", admin_notes_cancel),
+            CommandHandler("start", cmd_start_fallback),
+        ],
+        name="admin_notes",
+        allow_reentry=True,
+    )
+
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(conv_start, pattern=r"^prozvon_start$")],
         states={
@@ -484,6 +768,9 @@ def main() -> None:
 
     # /start має бути перед ConversationHandler, інакше деякі оновлення можуть «губитися».
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(admin_conv)
+    app.add_handler(CallbackQueryHandler(cb_admin_router, pattern=r"^adm:(l|v|s):"))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(cb_prozvon_my, pattern=r"^prozvon_my$"))
     app.add_handler(CallbackQueryHandler(cb_prozvon_new, pattern=r"^prozvon_new$"))
