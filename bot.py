@@ -109,6 +109,8 @@ def _admin_detail_keyboard(sheet_row: int, list_page: int) -> InlineKeyboardMark
 
 
 
+
+
 async def _admin_build_list_page(
     context: ContextTypes.DEFAULT_TYPE, page: int
 ) -> tuple[str, InlineKeyboardMarkup]:
