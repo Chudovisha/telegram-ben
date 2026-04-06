@@ -1,9 +1,15 @@
-"""Запуск Telegram-бота + легкий HTTP /health для Railway (PORT)."""
+"""Запуск Telegram-бота + легкий HTTP /health для Railway (PORT).
+
+Важливо: бот має працювати в **головному** потоці. Якщо залишити polling у daemon-потоці
+і він падає (токен, мережа, помилка імпорту), процес лишається «живим» лише через Flask —
+Railway зелений, а відповідей у Telegram немає.
+"""
 from __future__ import annotations
 
 import logging
 import os
 import threading
+import time
 
 from dotenv import load_dotenv
 
@@ -14,12 +20,6 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
-
-def run_bot_thread() -> None:
-    from bot import main as bot_main
-
-    bot_main()
 
 
 def run_health_app() -> None:
@@ -48,5 +48,11 @@ if __name__ == "__main__":
             "ADMIN_TELEGRAM_USER_IDS не задано — кнопка «Адмінка» у боті буде прихована."
         )
 
-    threading.Thread(target=run_bot_thread, daemon=True, name="telegram-bot").start()
-    run_health_app()
+    # Спочатку HTTP (Railway чекає на PORT), потім блокуючий polling у головному потоці.
+    threading.Thread(target=run_health_app, daemon=True, name="http-health").start()
+    time.sleep(0.4)
+
+    from bot import main as bot_main
+
+    logger.info("Запуск Telegram polling у головному потоці…")
+    bot_main()
